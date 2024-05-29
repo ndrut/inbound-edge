@@ -4,12 +4,12 @@ WORKDIR /app
 
 COPY . .
 
-WORKDIR /app/go-guerilla
+RUN cd go-guerilla && go mod download
 
 RUN go build -o smtp go-guerilla.go
 
 FROM alpine
 
-COPY --from=BUILD /app/go-guerilla/smtp /smtp
+COPY --from=BUILD /app/go-guerilla/smtp /
 
 CMD ["/smtp"]
