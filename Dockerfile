@@ -10,6 +10,6 @@ RUN go build -o smtp go-guerilla.go
 
 FROM alpine
 
-COPY --from=BUILD /app/go-guerilla/smtp /app/smtp
+COPY --from=BUILD /app/go-guerilla/smtp /smtp
 
-CMD ["/app/smtp"]
+CMD ["/smtp"]
