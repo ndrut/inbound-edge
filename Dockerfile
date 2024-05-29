@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN cd go-guerilla && go mod download
+RUN cd go-guerilla
 
 RUN go build -o smtp go-guerilla.go
 
