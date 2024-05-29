@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,11 +21,11 @@ import (
 )
 
 type StoreConfig struct {
-	AccessKey   string `json:"access_key"`
-	SecretKey   string `json:"secret_key"`
-	EndpointURL string `json:"endpoint_url"`
-	EsURL       string `json:"es_url"`
-	EsApiKey    string `json:"es_api_key"`
+	S3AccessKey   string `json:"s3_access_key"`
+	S3SecretKey   string `json:"s3_secret_key"`
+	S3EndpointURL string `json:"s3_endpoint_url"`
+	EsURL         string `json:"es_url"`
+	EsApiKey      string `json:"es_api_key"`
 }
 
 var StoreProcessor = func() backends.Decorator {
@@ -57,8 +58,8 @@ var StoreProcessor = func() backends.Decorator {
 			}
 		}
 
-		minioClient, err = minio.New(storeConfig.EndpointURL, &minio.Options{
-			Creds:  credentials.NewStaticV4(storeConfig.AccessKey, storeConfig.SecretKey, ""),
+		minioClient, err = minio.New(storeConfig.S3EndpointURL, &minio.Options{
+			Creds:  credentials.NewStaticV4(storeConfig.S3AccessKey, storeConfig.S3SecretKey, ""),
 			Secure: false,
 		})
 		if err != nil {
@@ -161,8 +162,13 @@ var StoreProcessor = func() backends.Decorator {
 					document.Date = time.Now()
 
 					esdata, _ := json.Marshal(document)
-					esClient.Index("messages", bytes.NewReader(esdata))
-
+					es, err := esClient.Index("messages", bytes.NewReader(esdata))
+					if es.IsError() {
+						backends.Log().WithError(err).Error(err, " Unable to index document: ", es)
+					} else {
+						backends.Log().Debug("es: ", es)
+					}
+					document = Document{}
 					return p.Process(e, task)
 				} else {
 					return p.Process(e, task)
@@ -218,16 +224,17 @@ func main() {
 	sc := guerrilla.ServerConfig{
 		ListenInterface: ":2526",
 		IsEnabled:       true,
+		Hostname:        os.Getenv("MAIL_HOSTNAME"),
 	}
 	cfg.Servers = append(cfg.Servers, sc)
 	bcfg := backends.BackendConfig{
-		"save_workers_size":  1,
+		"save_workers_size":  runtime.NumCPU(),
 		"save_process":       "HeadersParser|Header|Hasher|Store",
 		"log_received_mails": true,
-		"primary_mail_host":  "example.com",
-		"access_key":         os.Getenv("MINIO_ACCESS_KEY"),
-		"secret_key":         os.Getenv("MINIO_SECRET_KEY"),
-		"endpoint_url":       os.Getenv("MINIO_ENDPOINT"),
+		"primary_mail_host":  os.Getenv("MAIL_HOSTNAME"),
+		"s3_access_key":      os.Getenv("MINIO_ACCESS_KEY"),
+		"s3_secret_key":      os.Getenv("MINIO_SECRET_KEY"),
+		"s3_endpoint_url":    os.Getenv("MINIO_ENDPOINT"),
 		"es_url":             os.Getenv("ES_URL"),
 		"es_api_key":         os.Getenv("ES_API_KEY"),
 	}
@@ -235,7 +242,6 @@ func main() {
 
 	d := guerrilla.Daemon{Config: cfg}
 	d.AddProcessor("Store", StoreProcessor)
-	d.AddProcessor("Dkim", DkimProcessor)
 
 	err = d.Start()
 	if err == nil {
