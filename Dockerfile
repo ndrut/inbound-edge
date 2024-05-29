@@ -1,15 +1,15 @@
-FROM golang AS BUILD
+FROM golang:alpine AS builder 
 
 WORKDIR /app
 
 COPY . .
 
-RUN cd go-guerilla
+WORKDIR go-guerilla
 
 RUN go build -o smtp go-guerilla.go
 
-FROM alpine
+FROM alpine AS run
 
-COPY --from=BUILD /app/go-guerilla/smtp /
+COPY --from=builder /app/go-guerilla/smtp /
 
 CMD ["/smtp"]
