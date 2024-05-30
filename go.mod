@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	blitiri.com.ar/go/spf v1.5.1 // indirect
 	github.com/asaskevich/EventBus v0.0.0-20200907212545-49d423059eef // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/elastic-transport-go/v8 v8.5.0 // indirect
