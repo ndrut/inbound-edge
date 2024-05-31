@@ -188,6 +188,7 @@ func (s *Session) Data(r io.Reader) error {
 		-1,
 		minio.PutObjectOptions{
 			ContentType: "message/rfc822",
+			PartSize:    5 * 1024 * 1024,
 		})
 	s.storeDuration = time.Since(s.storeAt)
 	if rerr != nil || res.Location == "" {
