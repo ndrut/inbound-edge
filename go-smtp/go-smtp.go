@@ -65,24 +65,6 @@ type Backend struct {
 	esClient    *elasticsearch.Client
 }
 
-// NewSession is called after client greeting (EHLO, HELO).
-func (bkd *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
-	log.Println("New session from:", c.Conn().RemoteAddr(), "host:", c.Hostname(), c.Conn().RemoteAddr())
-	ip, _, _ := net.SplitHostPort(c.Conn().RemoteAddr().String())
-	tls, _ := c.TLSConnectionState()
-	return &Session{
-		header:      nil,
-		startedAt:   time.Now(),
-		minioClient: bkd.minioClient, // Pass the minioClient to the session
-		esClient:    bkd.esClient,
-		tos:         []string{},
-		values:      make(map[string]interface{}),
-		remoteip:    net.ParseIP(ip),
-		helo:        c.Hostname(),
-		tls:         &tls,
-	}, nil
-}
-
 // A Session is returned after successful login.
 type Session struct {
 	startedAt     time.Time
@@ -92,12 +74,13 @@ type Session struct {
 	from          string
 	tos           []string
 	helo          string
+	heloDNS       []string
 	remoteip      net.IP
 	spf           int
 	spfresult     string
 	id            string
 	requireTLS    bool
-	spfAt         time.Time
+	rdns          []string
 	spfDuration   time.Duration
 	storeAt       time.Time
 	storeDuration time.Duration
@@ -107,29 +90,33 @@ type Session struct {
 	subject       string
 }
 
-func createId(s *Session) string {
+func (s *Session) createId() {
 	h := sha256.New()
 	h.Write([]byte(s.remoteip.String()))
 	h.Write([]byte(s.helo))
 	h.Write([]byte(time.Now().String()))
-	return fmt.Sprintf("%x", h.Sum(nil))
+	s.id = fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// AuthMechanisms returns a slice of available auth mechanisms; only PLAIN is
-// supported in this example.
-func (s *Session) AuthMechanisms() []string {
-	return nil
+func (s *Session) checkRDNS() {
+	names, err := net.LookupAddr(s.remoteip.String())
+	if err != nil {
+		log.Println(s.id, "Error looking up RDNS:", err)
+	} else {
+		s.rdns = names
+		log.Println(s.id, "RDNS resolved:", s.remoteip, names)
+	}
+	ips, err := net.LookupHost(s.helo)
+	if err != nil {
+		log.Println(s.id, "Error looking up HELO:", err)
+	} else {
+		s.heloDNS = ips
+		log.Println(s.id, "HELO resolved:", s.helo, ips)
+	}
 }
 
-func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
-	if opts.Size > 0 {
-		s.bodySize = opts.Size
-	}
-	if opts.RequireTLS {
-		s.requireTLS = true
-	}
-	s.spfAt = time.Now()
-	s.id = createId(s)
+func (s *Session) checkSPF(from string) {
+	spfAt := time.Now()
 	// validate sender
 	result, err := spf.CheckHostWithSender(s.remoteip, s.helo, from)
 	if result == spf.Fail {
@@ -157,8 +144,49 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		s.spf = 1
 		s.spfresult = "pass"
 	}
-	s.spfDuration = time.Since(s.spfAt)
+	s.spfDuration = time.Since(spfAt)
+}
+
+// NewSession is called after client greeting (EHLO, HELO).
+func (bkd *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	log.Println("New session from:", c.Conn().RemoteAddr(), "host:", c.Hostname(), c.Conn().RemoteAddr())
+	ip, _, _ := net.SplitHostPort(c.Conn().RemoteAddr().String())
+	tls, _ := c.TLSConnectionState()
+	return &Session{
+		header:      nil,
+		startedAt:   time.Now(),
+		minioClient: bkd.minioClient, // Pass the minioClient to the session
+		esClient:    bkd.esClient,
+		tos:         []string{},
+		values:      make(map[string]interface{}),
+		remoteip:    net.ParseIP(ip),
+		helo:        c.Hostname(),
+		tls:         &tls,
+	}, nil
+}
+
+// AuthMechanisms returns a slice of available auth mechanisms; only PLAIN is
+// supported in this example.
+func (s *Session) AuthMechanisms() []string {
+	return nil
+}
+
+func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
+	// set from address
 	s.from = from
+	// create and set message id
+	s.createId()
+	// read size from opts
+	if opts.Size > 0 {
+		s.bodySize = opts.Size
+	}
+	if opts.RequireTLS {
+		s.requireTLS = true
+	}
+	// check reverse dns
+	s.checkRDNS()
+	// check spf
+	s.checkSPF(from)
 	printMemUsage()
 	return nil
 }
@@ -227,33 +255,40 @@ func (s *Session) Data(r io.Reader) error {
 	printMemUsage()
 
 	type Envelope struct {
-		MailFrom      string   `json:"mail_from"`
-		RcptTo        []string `json:"rcpt_to"`
-		Ehlo          string   `json:"ehlo"`
-		RemoteIp      string   `json:"remote_ip"`
-		Spf           int      `json:"spf"`
-		SpfResult     string   `json:"spf_result"`
-		TLS           bool     `json:"tls"`
-		TLSVersion    string   `json:"tls_version"`
-		TLSCipher     string   `json:"tls_cipher"`
-		TLSRequired   bool     `json:"tls_required"`
-		TLSServerName string   `json:"tls_server_name"`
-		QueuedId      string   `json:"queued_id"`
+		MailFrom      string        `json:"mail_from"`
+		RcptTo        []string      `json:"rcpt_to"`
+		Helo          string        `json:"helo"`
+		HeloDNS       []string      `json:"helo_dns"`
+		RemoteIp      string        `json:"remote_ip"`
+		RDNS          []string      `json:"rdns"`
+		Spf           int           `json:"spf"`
+		SpfIn         time.Duration `json:"spf_in"`
+		SpfResult     string        `json:"spf_result"`
+		TLS           bool          `json:"tls"`
+		TLSVersion    string        `json:"tls_version"`
+		TLSCipher     string        `json:"tls_cipher"`
+		TLSRequired   bool          `json:"tls_required"`
+		TLSServerName string        `json:"tls_server_name"`
+		QueuedId      string        `json:"queued_id"`
 	}
 	type Document struct {
-		Envelope Envelope            `json:"envelope"`
-		Headers  map[string][]string `json:"headers"`
-		StoreUrl string              `json:"store_url"`
-		StoredIn time.Duration       `json:"stored_in"`
-		Date     time.Time           `json:"date"`
+		Endpoint  string              `json:"endpoint"` // hostname
+		Envelope  Envelope            `json:"envelope"`
+		Headers   map[string][]string `json:"headers"`
+		StoredUrl string              `json:"stored_url"`
+		StoredIn  time.Duration       `json:"stored_in"`
+		Date      time.Time           `json:"date"`
 	}
 
 	document := Document{}
 	document.Envelope.MailFrom = s.from
 	document.Envelope.RcptTo = s.tos
-	document.Envelope.Ehlo = s.helo
+	document.Envelope.Helo = s.helo
+	document.Envelope.HeloDNS = s.heloDNS
 	document.Envelope.RemoteIp = s.remoteip.String()
+	document.Envelope.RDNS = s.rdns
 	document.Envelope.Spf = s.spf
+	document.Envelope.SpfIn = s.spfDuration
 	document.Envelope.SpfResult = s.spfresult
 	document.Envelope.TLS = s.tls.HandshakeComplete
 	if s.tls.HandshakeComplete {
@@ -263,7 +298,9 @@ func (s *Session) Data(r io.Reader) error {
 	}
 	document.Envelope.TLSRequired = s.requireTLS
 	document.Envelope.QueuedId = s.id
-	document.StoreUrl = res.Location
+
+	document.Endpoint = os.Getenv("MAIL_HOSTNAME")
+	document.StoredUrl = res.Location
 	document.StoredIn = s.storeDuration
 	document.Date = time.Now()
 	document.Headers = make(map[string][]string)
