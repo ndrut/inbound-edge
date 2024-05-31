@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-WORKDIR go-smtp
+WORKDIR /app/go-smtp
 
 RUN go build -o smtp go-smtp.go
 
