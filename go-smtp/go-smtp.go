@@ -20,6 +20,7 @@ import (
 
 	"blitiri.com.ar/go/spf"
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/emersion/go-msgauth/dmarc"
 	"github.com/emersion/go-smtp"
 	"github.com/joho/godotenv"
 	"github.com/minio/minio-go/v7"
@@ -67,27 +68,33 @@ type Backend struct {
 
 // A Session is returned after successful login.
 type Session struct {
-	startedAt     time.Time
-	minioClient   *minio.Client
-	esClient      *elasticsearch.Client
-	bodySize      int64
-	from          string
-	tos           []string
-	helo          string
-	heloDNS       []string
-	remoteip      net.IP
-	spf           int
-	spfresult     string
-	id            string
-	requireTLS    bool
-	rdns          []string
-	spfDuration   time.Duration
-	storeAt       time.Time
-	storeDuration time.Duration
-	tls           *tls.ConnectionState
-	header        textproto.MIMEHeader
-	values        map[string]interface{}
-	subject       string
+	startedAt       time.Time
+	minioClient     *minio.Client
+	esClient        *elasticsearch.Client
+	bodySize        int64
+	dmarc           int
+	dmarcresult     string
+	dmarcspf        dmarc.AlignmentMode
+	dmarcdkim       dmarc.AlignmentMode
+	dmarcreport     []string
+	dmarcreportfail []string
+	from            string
+	tos             []string
+	helo            string
+	heloDNS         []string
+	remoteip        net.IP
+	spf             int
+	spfresult       string
+	id              string
+	requireTLS      bool
+	rdns            []string
+	spfDuration     time.Duration
+	storeAt         time.Time
+	storeDuration   time.Duration
+	tls             *tls.ConnectionState
+	header          textproto.MIMEHeader
+	values          map[string]interface{}
+	subject         string
 }
 
 func (s *Session) createId() {
@@ -147,6 +154,42 @@ func (s *Session) checkSPF(from string) {
 	s.spfDuration = time.Since(spfAt)
 }
 
+func (s *Session) checkDMARC(from string) {
+	fromParts := strings.Split(from, "@")
+	domain := fromParts[1]
+	record, err := dmarc.Lookup(domain)
+	if err != nil {
+		if err == dmarc.ErrNoPolicy || record.Policy == dmarc.PolicyNone {
+			s.dmarc = 0
+			s.dmarcresult = "none"
+			log.Println(s.id, "No DMARC policy for", domain)
+		}
+		if dmarc.IsTempFail(err) {
+			s.dmarc = 2
+			s.dmarcresult = "tempfail"
+			log.Println(s.id, "DMARC tempfail for", domain)
+		}
+
+		s.dmarcspf = record.SPFAlignment
+		s.dmarcdkim = record.DKIMAlignment
+		s.dmarcreport = record.ReportURIAggregate
+		s.dmarcreportfail = record.ReportURIFailure
+
+		if record.Policy == dmarc.PolicyReject {
+			s.dmarc = 3
+			s.dmarcresult = "reject"
+			log.Println(s.id, "DMARC reject policy for", domain)
+		}
+		if record.Policy == dmarc.PolicyQuarantine {
+			s.dmarc = 2
+			s.dmarcresult = "quarantine"
+			log.Println(s.id, "DMARC quarantine policy for", domain)
+		}
+
+	}
+
+}
+
 // NewSession is called after client greeting (EHLO, HELO).
 func (bkd *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	log.Println("New session from:", c.Conn().RemoteAddr(), "host:", c.Hostname(), c.Conn().RemoteAddr())
@@ -187,6 +230,8 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	s.checkRDNS()
 	// check spf
 	s.checkSPF(from)
+	// check dmarc
+	s.checkDMARC(from)
 	printMemUsage()
 	return nil
 }
@@ -255,34 +300,48 @@ func (s *Session) Data(r io.Reader) error {
 	printMemUsage()
 
 	type Envelope struct {
-		MailFrom      string        `json:"mail_from"`
-		RcptTo        []string      `json:"rcpt_to"`
-		Helo          string        `json:"helo"`
-		HeloDNS       []string      `json:"helo_dns"`
-		RemoteIp      string        `json:"remote_ip"`
-		RDNS          []string      `json:"rdns"`
-		Spf           int           `json:"spf"`
-		SpfIn         time.Duration `json:"spf_in"`
-		SpfResult     string        `json:"spf_result"`
-		TLS           bool          `json:"tls"`
-		TLSVersion    string        `json:"tls_version"`
-		TLSCipher     string        `json:"tls_cipher"`
-		TLSRequired   bool          `json:"tls_required"`
-		TLSServerName string        `json:"tls_server_name"`
-		QueuedId      string        `json:"queued_id"`
+		MailFrom        string              `json:"mail_from"`
+		RcptTo          []string            `json:"rcpt_to"`
+		Dmarc           int                 `json:"dmarc"`
+		DmarcResult     string              `json:"dmarc_result"`
+		DmarcSpf        dmarc.AlignmentMode `json:"dmarc_spf"`
+		DmarcDkim       dmarc.AlignmentMode `json:"dmarc_dkim"`
+		DmarcReport     []string            `json:"dmarc_report"`
+		DmarcReportFail []string            `json:"dmarc_report_fail"`
+		Helo            string              `json:"helo"`
+		HeloDNS         []string            `json:"helo_dns"`
+		RemoteIp        string              `json:"remote_ip"`
+		RDNS            []string            `json:"rdns"`
+		Spf             int                 `json:"spf"`
+		SpfIn           time.Duration       `json:"spf_in"`
+		SpfResult       string              `json:"spf_result"`
+		TLS             bool                `json:"tls"`
+		TLSVersion      string              `json:"tls_version"`
+		TLSCipher       string              `json:"tls_cipher"`
+		TLSRequired     bool                `json:"tls_required"`
+		TLSServerName   string              `json:"tls_server_name"`
+		QueuedId        string              `json:"queued_id"`
 	}
 	type Document struct {
-		Endpoint  string              `json:"endpoint"` // hostname
-		Envelope  Envelope            `json:"envelope"`
-		Headers   map[string][]string `json:"headers"`
-		StoredUrl string              `json:"stored_url"`
-		StoredIn  time.Duration       `json:"stored_in"`
-		Date      time.Time           `json:"date"`
+		Endpoint    string              `json:"endpoint"` // hostname
+		Envelope    Envelope            `json:"envelope"`
+		Headers     map[string][]string `json:"headers"`
+		Hostname    string              `json:"hostname"`
+		StoredUrl   string              `json:"stored_url"`
+		StoredBytes int64               `json:"stored_bytes"`
+		StoredIn    time.Duration       `json:"stored_in"`
+		Date        time.Time           `json:"date"`
 	}
 
 	document := Document{}
 	document.Envelope.MailFrom = s.from
 	document.Envelope.RcptTo = s.tos
+	document.Envelope.Dmarc = s.dmarc
+	document.Envelope.DmarcResult = s.dmarcresult
+	document.Envelope.DmarcSpf = s.dmarcspf
+	document.Envelope.DmarcDkim = s.dmarcdkim
+	document.Envelope.DmarcReport = s.dmarcreport
+	document.Envelope.DmarcReportFail = s.dmarcreportfail
 	document.Envelope.Helo = s.helo
 	document.Envelope.HeloDNS = s.heloDNS
 	document.Envelope.RemoteIp = s.remoteip.String()
@@ -298,9 +357,15 @@ func (s *Session) Data(r io.Reader) error {
 	}
 	document.Envelope.TLSRequired = s.requireTLS
 	document.Envelope.QueuedId = s.id
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = os.Getenv("MAIL_HOSTNAME")
+	}
 
+	document.Hostname = hostname
 	document.Endpoint = os.Getenv("MAIL_HOSTNAME")
 	document.StoredUrl = res.Location
+	document.StoredBytes = res.Size
 	document.StoredIn = s.storeDuration
 	document.Date = time.Now()
 	document.Headers = make(map[string][]string)
