@@ -8,3 +8,5 @@ services:
       - ./.env:/.env
       - ./cfwc-crt.pem:/cfwc-crt.pem
       - ./cfwc-key.pem:/cfwc-key.pem
+    restart: unless-stopped
+    
