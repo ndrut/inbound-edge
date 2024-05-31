@@ -1,0 +1,10 @@
+name: honey
+services:
+  smtp:
+    image: ndru/inbound-edge:go-smtp
+    ports:
+      - "25:2525"
+    volumes:
+      - ./.env:/.env
+      - ./cfwc-crt.pem:/cfwc-crt.pem
+      - ./cfwc-key.pem:/cfwc-key.pem
