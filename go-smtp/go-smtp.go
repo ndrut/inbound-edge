@@ -147,12 +147,15 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	} else if result == spf.SoftFail {
 		log.Println(s.id, "SPF softfail:", s.remoteip, s.helo, from, err)
 		s.spf = 2
+		s.spfresult = "softfail"
 	} else if result == spf.Neutral || result == spf.None {
 		log.Println(s.id, "SPF neutral:", s.remoteip, s.helo, from, err)
 		s.spf = 0
+		s.spfresult = "neutral"
 	} else if result == spf.Pass {
 		log.Println(s.id, "SPF pass", s.remoteip.String(), s.helo, from)
 		s.spf = 1
+		s.spfresult = "pass"
 	}
 	s.spfDuration = time.Since(s.spfAt)
 	s.from = from
