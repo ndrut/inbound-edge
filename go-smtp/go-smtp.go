@@ -88,6 +88,7 @@ type Session struct {
 	startedAt     time.Time
 	minioClient   *minio.Client
 	esClient      *elasticsearch.Client
+	bodySize      int64
 	from          string
 	tos           []string
 	helo          string
@@ -121,6 +122,9 @@ func (s *Session) AuthMechanisms() []string {
 }
 
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
+	if opts.Size > 0 {
+		s.bodySize = opts.Size
+	}
 	if opts.RequireTLS {
 		s.requireTLS = true
 	}
@@ -163,25 +167,40 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 }
 
 func (s *Session) Data(r io.Reader) error {
-	printMemUsage()
 
-	rec := strings.NewReader(fmt.Sprintf("Received: from %s (%s) by %s\n", s.helo, s.remoteip, os.Getenv("MAIL_HOSTNAME")))
-	rec2 := strings.NewReader(fmt.Sprintf("  with ESMTP id %s\n", s.id))
-	rec3 := strings.NewReader(fmt.Sprintf("  for <%s>; %s\n", s.tos[0], time.Now().Format(time.RFC1123Z)))
+	rec := strings.NewReader(
+		fmt.Sprintf("Received: from %s (%s) by %s\n", s.helo, s.remoteip, os.Getenv("MAIL_HOSTNAME")) +
+			fmt.Sprintf("  with ESMTP id %s\n", s.id) +
+			fmt.Sprintf("  for <%s>; %s\n", s.tos[0], time.Now().Format(time.RFC1123Z)))
 
-	multiReader := io.MultiReader(rec, rec2, rec3, r)
+	multiReader := io.MultiReader(rec, r)
 	var buf bytes.Buffer
+	data := io.TeeReader(multiReader, &buf)
 	printMemUsage()
-	tee := io.TeeReader(multiReader, &buf)
-	// find where the header ends, assuming that over 30 kb would be max
-	maxHeaderChunk := 30 * 1024
-	_, berr := io.CopyN(&buf, tee, int64(maxHeaderChunk))
-	if berr != nil && berr != io.EOF {
-		log.Println(s.id, "Error reading email data:", berr)
+
+	// Upload the email data to MinIO using a streaming reader
+	s.storeAt = time.Now()
+	res, rerr := s.minioClient.PutObject(
+		context.Background(),
+		os.Getenv("S3_BUCKET_NAME"),
+		s.id,
+		data,
+		-1,
+		minio.PutObjectOptions{
+			ContentType: "message/rfc822",
+		})
+	s.storeDuration = time.Since(s.storeAt)
+	if rerr != nil {
+		log.Println(s.id, "Error uploading email data to MinIO:", rerr)
+		return &smtp.SMTPError{
+			Code:         451,
+			Message:      "Temporary backend failure, please try again later",
+			EnhancedCode: smtp.EnhancedCode{4, 4, 0},
+		}
+	} else {
+		log.Println("Stored in", s.storeDuration, "key:", s.id, "url:", res.Location, res)
 	}
-	printMemUsage()
-	//headerEnd := bytes.Index(buf, []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
-	//if headerEnd > -1 {
+
 	headerReader := textproto.NewReader(bufio.NewReader(&buf))
 	var err error
 	s.header, err = headerReader.ReadMIMEHeader()
@@ -200,28 +219,6 @@ func (s *Session) Data(r io.Reader) error {
 	}
 
 	printMemUsage()
-	// Upload the email data to MinIO using a streaming reader
-	s.storeAt = time.Now()
-	res, err := s.minioClient.PutObject(
-		context.Background(),
-		os.Getenv("S3_BUCKET_NAME"),
-		s.id,
-		tee,
-		-1,
-		minio.PutObjectOptions{
-			ContentType: "message/rfc822",
-		})
-	s.storeDuration = time.Since(s.storeAt)
-	if err != nil {
-		log.Println(s.id, "Error uploading email data to MinIO:", err)
-		return &smtp.SMTPError{
-			Code:         451,
-			Message:      "Temporary backend failure, please try again later",
-			EnhancedCode: smtp.EnhancedCode{4, 4, 0},
-		}
-	} else {
-		log.Println("Stored in", s.storeDuration, "key:", s.id, "url:", res.Location)
-	}
 
 	type Envelope struct {
 		MailFrom string   `json:"mail_from"`
