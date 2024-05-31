@@ -161,7 +161,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 }
 
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	// log.Println("Rcpt to:", to)
+	// TODO: validate recipient
 	s.tos = append(s.tos, to)
 	return nil
 }
@@ -190,7 +190,7 @@ func (s *Session) Data(r io.Reader) error {
 			ContentType: "message/rfc822",
 		})
 	s.storeDuration = time.Since(s.storeAt)
-	if rerr != nil {
+	if rerr != nil || res.Location == "" {
 		log.Println(s.id, "Error uploading email data to MinIO:", rerr)
 		return &smtp.SMTPError{
 			Code:         451,
@@ -200,6 +200,8 @@ func (s *Session) Data(r io.Reader) error {
 	} else {
 		log.Println("Stored in", s.storeDuration, "key:", s.id, "url:", res.Location, res)
 	}
+
+	printMemUsage()
 
 	headerReader := textproto.NewReader(bufio.NewReader(&buf))
 	var err error
@@ -221,12 +223,18 @@ func (s *Session) Data(r io.Reader) error {
 	printMemUsage()
 
 	type Envelope struct {
-		MailFrom string   `json:"mail_from"`
-		RcptTo   []string `json:"rcpt_to"`
-		Ehlo     string   `json:"ehlo"`
-		RemoteIp string   `json:"remote_ip"`
-		TLS      bool     `json:"tls"`
-		QueuedId string   `json:"queued_id"`
+		MailFrom      string   `json:"mail_from"`
+		RcptTo        []string `json:"rcpt_to"`
+		Ehlo          string   `json:"ehlo"`
+		RemoteIp      string   `json:"remote_ip"`
+		Spf           int      `json:"spf"`
+		SpfResult     string   `json:"spf_result"`
+		TLS           bool     `json:"tls"`
+		TLSVersion    string   `json:"tls_version"`
+		TLSCipher     string   `json:"tls_cipher"`
+		TLSRequired   bool     `json:"tls_required"`
+		TLSServerName string   `json:"tls_server_name"`
+		QueuedId      string   `json:"queued_id"`
 	}
 	type Document struct {
 		Envelope Envelope            `json:"envelope"`
@@ -241,7 +249,15 @@ func (s *Session) Data(r io.Reader) error {
 	document.Envelope.RcptTo = s.tos
 	document.Envelope.Ehlo = s.helo
 	document.Envelope.RemoteIp = s.remoteip.String()
-	document.Envelope.TLS = s.tls != nil
+	document.Envelope.Spf = s.spf
+	document.Envelope.SpfResult = s.spfresult
+	document.Envelope.TLS = s.tls.HandshakeComplete
+	if s.tls.HandshakeComplete {
+		document.Envelope.TLSVersion = tls.VersionName(s.tls.Version)
+		document.Envelope.TLSCipher = tls.CipherSuiteName(s.tls.CipherSuite)
+		document.Envelope.TLSServerName = s.tls.ServerName
+	}
+	document.Envelope.TLSRequired = s.requireTLS
 	document.Envelope.QueuedId = s.id
 	document.StoreUrl = res.Location
 	document.StoredIn = s.storeDuration
