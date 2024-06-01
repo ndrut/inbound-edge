@@ -5,6 +5,7 @@ go 1.22.3
 require (
 	blitiri.com.ar/go/spf v1.5.1
 	github.com/elastic/go-elasticsearch/v8 v8.13.1
+	github.com/emersion/go-msgauth v0.6.8
 	github.com/emersion/go-smtp v0.21.2
 	github.com/joho/godotenv v1.5.1
 	github.com/minio/minio-go/v7 v7.0.70
@@ -15,7 +16,6 @@ require (
 	github.com/asaskevich/EventBus v0.0.0-20200907212545-49d423059eef // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/elastic-transport-go/v8 v8.5.0 // indirect
-	github.com/emersion/go-msgauth v0.6.8 // indirect
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 // indirect
 	github.com/go-logr/logr v1.3.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

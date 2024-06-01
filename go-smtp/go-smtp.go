@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"blitiri.com.ar/go/spf"
@@ -105,7 +106,8 @@ func (s *Session) createId() {
 	s.id = fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func (s *Session) checkRDNS() {
+func (s *Session) checkRDNS(wg *sync.WaitGroup) {
+	defer wg.Done()
 	names, err := net.LookupAddr(s.remoteip.String())
 	if err != nil {
 		log.Println(s.id, "Error looking up RDNS:", err)
@@ -113,6 +115,10 @@ func (s *Session) checkRDNS() {
 		s.rdns = names
 		log.Println(s.id, "RDNS resolved:", s.remoteip, names)
 	}
+}
+
+func (s *Session) checkHeloDNS(wg *sync.WaitGroup) {
+	defer wg.Done()
 	ips, err := net.LookupHost(s.helo)
 	if err != nil {
 		log.Println(s.id, "Error looking up HELO:", err)
@@ -122,72 +128,78 @@ func (s *Session) checkRDNS() {
 	}
 }
 
-func (s *Session) checkSPF(from string) {
+func (s *Session) checkSPF(from string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	spfAt := time.Now()
 	// validate sender
 	result, err := spf.CheckHostWithSender(s.remoteip, s.helo, from)
 	if result == spf.Fail {
-		log.Println(s.id, "SPF fail:", s.remoteip, s.helo, from, err)
+		s.spf = 3
 		s.spfresult = "fail"
-		s.spf = 3
+		log.Println(s.id, "SPF fail:", s.remoteip, s.helo, from, err)
 	} else if result == spf.TempError {
-		log.Println(s.id, "SPF temperror:", s.remoteip, s.helo, from, err)
-		s.spfresult = "temperror"
 		s.spf = 2
+		s.spfresult = "temperror"
+		log.Println(s.id, "SPF temperror:", s.remoteip, s.helo, from, err)
 	} else if result == spf.PermError {
-		log.Println(s.id, "SPF permerror:", s.remoteip, s.helo, from, err)
-		s.spfresult = "permerror"
 		s.spf = 3
+		s.spfresult = "permerror"
+		log.Println(s.id, "SPF permerror:", s.remoteip, s.helo, from, err)
 	} else if result == spf.SoftFail {
-		log.Println(s.id, "SPF softfail:", s.remoteip, s.helo, from, err)
 		s.spf = 2
 		s.spfresult = "softfail"
+		log.Println(s.id, "SPF softfail:", s.remoteip, s.helo, from, err)
 	} else if result == spf.Neutral || result == spf.None {
-		log.Println(s.id, "SPF neutral:", s.remoteip, s.helo, from, err)
 		s.spf = 0
 		s.spfresult = "neutral"
+		log.Println(s.id, "SPF neutral:", s.remoteip, s.helo, from, err)
 	} else if result == spf.Pass {
-		log.Println(s.id, "SPF pass", s.remoteip.String(), s.helo, from)
 		s.spf = 1
 		s.spfresult = "pass"
+		log.Println(s.id, "SPF pass:", s.remoteip.String(), s.helo, from)
 	}
 	s.spfDuration = time.Since(spfAt)
 }
 
-func (s *Session) checkDMARC(from string) {
+func (s *Session) checkDMARC(from string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	fromParts := strings.Split(from, "@")
-	domain := fromParts[1]
+	var domain string
+	if len(fromParts) > 1 {
+		domain = fromParts[1]
+	} else {
+		log.Println(s.id, "Invalid from address:", from)
+		return
+	}
 	record, err := dmarc.Lookup(domain)
 	if err != nil {
 		if err == dmarc.ErrNoPolicy || record.Policy == dmarc.PolicyNone {
 			s.dmarc = 0
 			s.dmarcresult = "none"
 			log.Println(s.id, "No DMARC policy for", domain)
+			return
 		}
 		if dmarc.IsTempFail(err) {
 			s.dmarc = 2
 			s.dmarcresult = "tempfail"
 			log.Println(s.id, "DMARC tempfail for", domain)
+			return
 		}
-
-		s.dmarcspf = record.SPFAlignment
-		s.dmarcdkim = record.DKIMAlignment
-		s.dmarcreport = record.ReportURIAggregate
-		s.dmarcreportfail = record.ReportURIFailure
-
-		if record.Policy == dmarc.PolicyReject {
-			s.dmarc = 3
-			s.dmarcresult = "reject"
-			log.Println(s.id, "DMARC reject policy for", domain)
-		}
-		if record.Policy == dmarc.PolicyQuarantine {
-			s.dmarc = 2
-			s.dmarcresult = "quarantine"
-			log.Println(s.id, "DMARC quarantine policy for", domain)
-		}
-
 	}
-
+	if record.Policy == dmarc.PolicyReject {
+		s.dmarc = 3
+		s.dmarcresult = "reject"
+		log.Println(s.id, "DMARC reject policy for", domain)
+	}
+	if record.Policy == dmarc.PolicyQuarantine {
+		s.dmarc = 2
+		s.dmarcresult = "quarantine"
+		log.Println(s.id, "DMARC quarantine policy for", domain)
+	}
+	s.dmarcspf = record.SPFAlignment
+	s.dmarcdkim = record.DKIMAlignment
+	s.dmarcreport = record.ReportURIAggregate
+	s.dmarcreportfail = record.ReportURIFailure
 }
 
 // NewSession is called after client greeting (EHLO, HELO).
@@ -226,12 +238,21 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	if opts.RequireTLS {
 		s.requireTLS = true
 	}
+
+	// run the dns requests concurrently
+	var wg sync.WaitGroup
+	wg.Add(4)
 	// check reverse dns
-	s.checkRDNS()
+	go s.checkRDNS(&wg)
+	// check helo dns
+	go s.checkHeloDNS(&wg)
 	// check spf
-	s.checkSPF(from)
+	go s.checkSPF(from, &wg)
 	// check dmarc
-	s.checkDMARC(from)
+	go s.checkDMARC(from, &wg)
+
+	wg.Wait()
+
 	printMemUsage()
 	return nil
 }
